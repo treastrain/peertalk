@@ -1,27 +1,33 @@
 #import "PTExampleProtocol.h"
 #import "PTViewController.h"
 
-@interface PTViewController () {
+@interface PTViewController () <
+PTChannelDelegate,
+UITextFieldDelegate
+> {
   __weak PTChannel *serverChannel_;
   __weak PTChannel *peerChannel_;
 }
-- (void)appendOutputMessage:(NSString*)message;
-- (void)sendDeviceInfo;
+@property (nonatomic) IBOutlet UIStackView *stackView;
+@property (nonatomic) IBOutlet UITextView *outputTextView;
+@property (nonatomic) IBOutlet UITextField *inputTextField;
+@property (nonatomic) IBOutlet NSLayoutConstraint *bottomConstraint;
 @end
 
 @implementation PTViewController
 
+@synthesize stackView = stackView_;
+@synthesize bottomConstraint = bottomConstraint_;
 @synthesize outputTextView = outputTextView_;
 @synthesize inputTextField = inputTextField_;
 
 - (void)viewDidLoad {
   [super viewDidLoad];
-  
+
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
+
   // Setup UI
-  inputTextField_.delegate = self;
-  inputTextField_.enablesReturnKeyAutomatically = NO;
   [inputTextField_ becomeFirstResponder];
-  outputTextView_.text = @"";
   
   // Create a new channel that is listening on our IPv4 port
   PTChannel *channel = [PTChannel channelWithDelegate:self];
@@ -30,26 +36,24 @@
       [self appendOutputMessage:[NSString stringWithFormat:@"Failed to listen on 127.0.0.1:%d: %@", PTExampleProtocolIPv4PortNumber, error]];
     } else {
       [self appendOutputMessage:[NSString stringWithFormat:@"Listening on 127.0.0.1:%d", PTExampleProtocolIPv4PortNumber]];
-      serverChannel_ = channel;
+      self->serverChannel_ = channel;
     }
   }];
 }
 
-- (void)viewDidUnload {
-  if (serverChannel_) {
-    [serverChannel_ close];
-  }
-  [super viewDidUnload];
+- (void)keyboardWillShow:(NSNotification *)notification {
+	CGRect keybordEndFrame = [notification.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+	bottomConstraint_.constant = -keybordEndFrame.size.height;
 }
 
-- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
-  return interfaceOrientation == UIInterfaceOrientationPortrait;
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+	return UIInterfaceOrientationMaskPortrait;
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
   if (peerChannel_) {
-    [self sendMessage:self.inputTextField.text];
-    self.inputTextField.text = @"";
+    [self sendMessage:inputTextField_.text];
+    inputTextField_.text = @"";
     return NO;
   } else {
     return YES;
@@ -59,7 +63,7 @@
 - (void)sendMessage:(NSString*)message {
   if (peerChannel_) {
     dispatch_data_t payload = PTExampleTextDispatchDataWithString(message);
-    [peerChannel_ sendFrameOfType:PTExampleFrameTypeTextMessage tag:PTFrameNoTag withPayload:payload callback:^(NSError *error) {
+    [peerChannel_ sendFrameOfType:PTExampleFrameTypeTextMessage tag:PTFrameNoTag withPayload:(NSData *)payload callback:^(NSError *error) {
       if (error) {
         NSLog(@"Failed to send message: %@", error);
       }
@@ -72,12 +76,12 @@
 
 - (void)appendOutputMessage:(NSString*)message {
   NSLog(@">> %@", message);
-  NSString *text = self.outputTextView.text;
+  NSString *text = outputTextView_.text;
   if (text.length == 0) {
-    self.outputTextView.text = [text stringByAppendingString:message];
+    outputTextView_.text = [text stringByAppendingString:message];
   } else {
-    self.outputTextView.text = [text stringByAppendingFormat:@"\n%@", message];
-    [self.outputTextView scrollRangeToVisible:NSMakeRange(self.outputTextView.text.length, 0)];
+    outputTextView_.text = [text stringByAppendingFormat:@"\n%@", message];
+    [outputTextView_ scrollRangeToVisible:NSMakeRange(outputTextView_.text.length, 0)];
   }
 }
 
@@ -106,7 +110,7 @@
                         [NSNumber numberWithDouble:screen.scale], @"screenScale",
                         nil];
   dispatch_data_t payload = [info createReferencingDispatchData];
-  [peerChannel_ sendFrameOfType:PTExampleFrameTypeDeviceInfo tag:PTFrameNoTag withPayload:payload callback:^(NSError *error) {
+  [peerChannel_ sendFrameOfType:PTExampleFrameTypeDeviceInfo tag:PTFrameNoTag withPayload:(NSData *)payload callback:^(NSError *error) {
     if (error) {
       NSLog(@"Failed to send PTExampleFrameTypeDeviceInfo: %@", error);
     }
@@ -132,10 +136,9 @@
 }
 
 // Invoked when a new frame has arrived on a channel.
-- (void)ioFrameChannel:(PTChannel*)channel didReceiveFrameOfType:(uint32_t)type tag:(uint32_t)tag payload:(PTData*)payload {
-  //NSLog(@"didReceiveFrameOfType: %u, %u, %@", type, tag, payload);
+- (void)ioFrameChannel:(PTChannel*)channel didReceiveFrameOfType:(uint32_t)type tag:(uint32_t)tag payload:(NSData *)payload {
   if (type == PTExampleFrameTypeTextMessage) {
-    PTExampleTextFrame *textFrame = (PTExampleTextFrame*)payload.data;
+    PTExampleTextFrame *textFrame = (PTExampleTextFrame*)payload.bytes;
     textFrame->length = ntohl(textFrame->length);
     NSString *message = [[NSString alloc] initWithBytes:textFrame->utf8text length:textFrame->length encoding:NSUTF8StringEncoding];
     [self appendOutputMessage:[NSString stringWithFormat:@"[%@]: %@", channel.userInfo, message]];

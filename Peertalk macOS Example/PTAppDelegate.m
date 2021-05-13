@@ -1,6 +1,9 @@
 #import "PTAppDelegate.h"
-#import "PTUSBHub.h"
+
 #import "PTExampleProtocol.h"
+
+#import <peertalk/PTProtocol.h>
+#import <peertalk/PTUSBHub.h>
 #import <QuartzCore/QuartzCore.h>
 
 @interface PTAppDelegate () {
@@ -80,7 +83,7 @@
   if (connectedChannel_) {
     NSString *message = self.inputTextField.stringValue;
     dispatch_data_t payload = PTExampleTextDispatchDataWithString(message);
-    [connectedChannel_ sendFrameOfType:PTExampleFrameTypeTextMessage tag:PTFrameNoTag withPayload:payload callback:^(NSError *error) {
+    [connectedChannel_ sendFrameOfType:PTExampleFrameTypeTextMessage tag:PTFrameNoTag withPayload:(NSData *)payload callback:^(NSError *error) {
       if (error) {
         NSLog(@"Failed to send message: %@", error);
       }
@@ -104,16 +107,15 @@
   [NSAnimationContext currentContext].duration = 0.15;
   [NSAnimationContext currentContext].timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
   NSClipView* clipView = [[self.outputTextView enclosingScrollView] contentView];
-  NSPoint newOrigin = clipView.bounds.origin;
+	NSRect clipViewBounds = clipView.bounds;
+  NSPoint newOrigin = clipViewBounds.origin;
   newOrigin.y += 5.0; // hack A 1/2
   [clipView setBoundsOrigin:newOrigin]; // hack A 2/2
   newOrigin.y += 1000.0;
-  newOrigin = [clipView constrainScrollPoint:newOrigin];
-  [clipView.animator setBoundsOrigin:newOrigin];
+	clipViewBounds.origin = newOrigin;
+  clipViewBounds = [clipView constrainBoundsRect:clipViewBounds];
+  [clipView.animator setBoundsOrigin:clipViewBounds.origin];
   [NSAnimationContext endGrouping];
-  
-  // Scrolling w/o animation:
-  //[self.outputTextView scrollToEndOfDocument:self];
 }
 
 
@@ -167,7 +169,7 @@
       [self performSelector:@selector(ping) withObject:nil afterDelay:1.0];
       [pingInfo setObject:[NSDate date] forKey:@"date sent"];
       if (error) {
-        [pings_ removeObjectForKey:tag];
+        [self->pings_ removeObjectForKey:tag];
       }
     }];
   } else {
@@ -193,13 +195,13 @@
   }
 }
 
-- (void)ioFrameChannel:(PTChannel*)channel didReceiveFrameOfType:(uint32_t)type tag:(uint32_t)tag payload:(PTData*)payload {
+- (void)ioFrameChannel:(PTChannel*)channel didReceiveFrameOfType:(uint32_t)type tag:(uint32_t)tag payload:(NSData *)payload {
   //NSLog(@"received %@, %u, %u, %@", channel, type, tag, payload);
   if (type == PTExampleFrameTypeDeviceInfo) {
-    NSDictionary *deviceInfo = [NSDictionary dictionaryWithContentsOfDispatchData:payload.dispatchData];
+		NSDictionary *deviceInfo = [NSData dictionaryWithContentsOfData:payload];
     [self presentMessage:[NSString stringWithFormat:@"Connected to %@", deviceInfo.description] isStatus:YES];
   } else if (type == PTExampleFrameTypeTextMessage) {
-    PTExampleTextFrame *textFrame = (PTExampleTextFrame*)payload.data;
+    PTExampleTextFrame *textFrame = (PTExampleTextFrame*)payload.bytes;
     textFrame->length = ntohl(textFrame->length);
     NSString *message = [[NSString alloc] initWithBytes:textFrame->utf8text length:textFrame->length encoding:NSUTF8StringEncoding];
     [self presentMessage:[NSString stringWithFormat:@"[%@]: %@", channel.userInfo, message] isStatus:NO];
@@ -227,30 +229,30 @@
   NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
   
   [nc addObserverForName:PTUSBDeviceDidAttachNotification object:PTUSBHub.sharedHub queue:nil usingBlock:^(NSNotification *note) {
-    NSNumber *deviceID = [note.userInfo objectForKey:@"DeviceID"];
+    NSNumber *deviceID = [note.userInfo objectForKey:PTUSBHubNotificationKeyDeviceID];
     //NSLog(@"PTUSBDeviceDidAttachNotification: %@", note.userInfo);
     NSLog(@"PTUSBDeviceDidAttachNotification: %@", deviceID);
 
-    dispatch_async(notConnectedQueue_, ^{
-      if (!connectingToDeviceID_ || ![deviceID isEqualToNumber:connectingToDeviceID_]) {
+    dispatch_async(self->notConnectedQueue_, ^{
+      if (!self->connectingToDeviceID_ || ![deviceID isEqualToNumber:self->connectingToDeviceID_]) {
         [self disconnectFromCurrentChannel];
-        connectingToDeviceID_ = deviceID;
-        connectedDeviceProperties_ = [note.userInfo objectForKey:@"Properties"];
+				self->connectingToDeviceID_ = deviceID;
+				self->connectedDeviceProperties_ = [note.userInfo objectForKey:PTUSBHubNotificationKeyProperties];
         [self enqueueConnectToUSBDevice];
       }
     });
   }];
   
   [nc addObserverForName:PTUSBDeviceDidDetachNotification object:PTUSBHub.sharedHub queue:nil usingBlock:^(NSNotification *note) {
-    NSNumber *deviceID = [note.userInfo objectForKey:@"DeviceID"];
+    NSNumber *deviceID = [note.userInfo objectForKey:PTUSBHubNotificationKeyDeviceID];
     //NSLog(@"PTUSBDeviceDidDetachNotification: %@", note.userInfo);
     NSLog(@"PTUSBDeviceDidDetachNotification: %@", deviceID);
     
-    if ([connectingToDeviceID_ isEqualToNumber:deviceID]) {
-      connectedDeviceProperties_ = nil;
-      connectingToDeviceID_ = nil;
-      if (connectedChannel_) {
-        [connectedChannel_ close];
+    if ([self->connectingToDeviceID_ isEqualToNumber:deviceID]) {
+			self->connectedDeviceProperties_ = nil;
+			self->connectingToDeviceID_ = nil;
+      if (self->connectedChannel_) {
+        [self->connectedChannel_ close];
       }
     }
   }];
@@ -326,14 +328,12 @@
       } else {
         NSLog(@"Failed to connect to device #%@: %@", channel.userInfo, error);
       }
-      if (channel.userInfo == connectingToDeviceID_) {
+      if (channel.userInfo == self->connectingToDeviceID_) {
         [self performSelector:@selector(enqueueConnectToUSBDevice) withObject:nil afterDelay:PTAppReconnectDelay];
       }
     } else {
-      connectedDeviceID_ = connectingToDeviceID_;
+			self->connectedDeviceID_ = self->connectingToDeviceID_;
       self.connectedChannel = channel;
-      //NSLog(@"Connected to device #%@\n%@", connectingToDeviceID_, connectedDeviceProperties_);
-      //infoTextField_.stringValue = [NSString stringWithFormat:@"Connected to device #%@\n%@", deviceID, connectedDeviceProperties_];
     }
   }];
 }
