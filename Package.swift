@@ -28,6 +28,6 @@ let package = Package(
             name: "PeerTalkTests",
             dependencies: ["PeerTalk"],
             path: "peertalk-tests",
-            exclude: ["peertalkTests-Info.plist"]),
+            exclude: ["Info.plist"]),
     ]
 )
